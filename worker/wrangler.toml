@@ -1,0 +1,22 @@
+name = "roseglass-perception"
+main = "rose-glass-perception.js"
+compatibility_date = "2024-12-01"
+
+[vars]
+ENVIRONMENT = "production"
+
+# Custom domain routing
+# Once deployed, add custom domain in Cloudflare dashboard:
+# roseglass-perception.macgregortechnologies.workers.dev
+# Or bind to a subdomain like: perception.roseglass.chat
+
+# Durable Objects for persistent session state (future)
+# [durable_objects]
+# bindings = [
+#   { name = "SESSIONS", class_name = "PerceptionSession" }
+# ]
+
+# KV namespace for lens configurations (future — allow user-created lenses)
+# [[kv_namespaces]]
+# binding = "LENS_STORE"
+# id = "your-kv-namespace-id"
