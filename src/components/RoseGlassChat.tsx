@@ -3,196 +3,191 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 /*
- * roseglass.chat — Cognitive Mirror Interface
- * 
- * A conversation interface where Rose Glass runs silently underneath,
- * tracking the user's dimensional coherence across the conversation
- * and surfacing pattern alerts when reasoning deforms under pressure.
- * 
- * Not a chatbot. A cognitive mirror with mathematical backing.
+ * roseglass.chat — C(x) Diffractive Chat Interface (WP-2026-007)
+ *
+ * Conversation interface powered by the roseglass-chat edge function.
+ * Every message is perceived through four Fresnel zones. The interference
+ * pattern is computed, stored, and injected into the LLM's perception.
+ * The topology is visible in the sidebar.
  */
 
 // ─── Configuration ───────────────────────────────────────────────
-const PERCEPTION_WORKER_URL = "https://roseglass-perception.macgregortechnologies.workers.dev";
-// Falls back to direct computation if worker unavailable
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://boupwgkkzexwisctrhdr.supabase.co";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
-const LENS_OPTIONS = [
-  { id: "auto", name: "Auto-Calibrating", short: "Auto" },
-  { id: "conservative_american", name: "Conservative American", short: "Conservative" },
-  { id: "liberal_american", name: "Liberal American", short: "Liberal" },
-  { id: "venture_capital", name: "Venture Capital Investor", short: "VC" },
-  { id: "tech_informed", name: "Tech-Informed", short: "Tech" },
-  { id: "non_tech", name: "Non-Technical", short: "Non-Tech" },
-  { id: "geopolitical_analyst", name: "Geopolitical Analyst", short: "Geopolitical" },
-  { id: "high_net_worth", name: "High Net Worth", short: "HNW" },
-  { id: "neurodivergent", name: "Neurodivergent", short: "ND" },
-];
+// ─── Types ───────────────────────────────────────────────────────
+interface ZoneReading {
+  A: number;
+  phi: number;
+}
+
+interface CxReading {
+  Cx: number;
+  tau: number;
+  lambda: number;
+  veritas_ratio: number;
+  has_dark_spot: boolean;
+  zones: Record<string, ZoneReading>;
+}
+
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  cx?: CxReading;
+}
 
 // ─── Utility ─────────────────────────────────────────────────────
-function cn(...classes) {
+function cn(...classes: (string | false | undefined | null)[]) {
   return classes.filter(Boolean).join(" ");
 }
 
-function DimensionBar({ label, symbol, value, baseline, gradient, color }) {
-  const delta = gradient !== undefined ? gradient : 0;
-  const width = Math.max(2, Math.min(100, value * 100));
-  const baselinePos = baseline ? Math.min(100, baseline * 100) : null;
+function radToDeg(phi: number): string {
+  return (phi * 180 / Math.PI).toFixed(0);
+}
+
+function isDestructive(phi: number): boolean {
+  return Math.abs(phi) > Math.PI * 0.4;
+}
+
+function cxColor(cx: number, hasDarkSpot: boolean): string {
+  if (hasDarkSpot) return "rgb(239,68,68)";
+  if (cx > 0.6) return "rgb(74,222,128)";
+  if (cx > 0.3) return "rgb(250,204,21)";
+  return "rgb(251,146,60)";
+}
+
+// ─── Zone Bar Component ──────────────────────────────────────────
+const ZONE_META: Record<string, { label: string; symbol: string; color: string }> = {
+  q:   { label: "Sentiment",  symbol: "q", color: "rgb(252,165,165)" },
+  f:   { label: "Belonging",  symbol: "f", color: "rgb(134,239,172)" },
+  rho: { label: "Wisdom",     symbol: "ρ", color: "rgb(167,139,250)" },
+  psi: { label: "Linguistic",  symbol: "Ψ", color: "rgb(147,197,253)" },
+};
+
+function ZoneBar({ zoneKey, reading }: { zoneKey: string; reading: ZoneReading }) {
+  const meta = ZONE_META[zoneKey];
+  if (!meta) return null;
+
+  const ampWidth = Math.max(2, Math.min(100, reading.A * 100));
+  const dest = isDestructive(reading.phi);
 
   return (
     <div className="mb-3">
       <div className="flex justify-between items-center mb-1">
         <span className="text-xs font-mono opacity-70">
-          {symbol} <span className="opacity-50">{label}</span>
+          {meta.symbol} <span className="opacity-50">{meta.label}</span>
         </span>
         <span className="text-xs font-mono">
-          {value.toFixed(2)}
-          {delta !== 0 && (
-            <span className={delta > 0 ? "text-emerald-400 ml-1" : "text-rose-400 ml-1"}>
-              {delta > 0 ? "+" : ""}{delta.toFixed(3)}
-            </span>
-          )}
+          A={reading.A.toFixed(2)}
+          <span className={cn("ml-1.5", dest ? "text-rose-400" : "opacity-40")}>
+            φ={radToDeg(reading.phi)}°
+          </span>
         </span>
       </div>
       <div className="relative h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
         <div
           className="absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out"
-          style={{ width: `${width}%`, background: color }}
+          style={{ width: `${ampWidth}%`, background: meta.color, opacity: dest ? 0.4 : 1 }}
         />
-        {baselinePos && (
-          <div
-            className="absolute top-0 bottom-0 w-px opacity-40"
-            style={{ left: `${baselinePos}%`, background: "#fff" }}
-          />
-        )}
+      </div>
+      {dest && (
+        <div className="text-[9px] font-mono text-rose-400/60 mt-0.5">DESTRUCTIVE</div>
+      )}
+    </div>
+  );
+}
+
+// ─── C(x) Sparkline ──────────────────────────────────────────────
+function CxSparkline({ history }: { history: CxReading[] }) {
+  if (history.length < 2) return null;
+
+  const w = 280, h = 60, pad = 4;
+  const maxIdx = history.length - 1;
+
+  function toPath(key: "Cx" | "veritas_ratio") {
+    return history
+      .map((d, i) => {
+        const x = pad + (i / maxIdx) * (w - pad * 2);
+        const val = Math.min(1, key === "Cx" ? d.Cx : d.veritas_ratio);
+        const y = h - pad - val * (h - pad * 2);
+        return `${i === 0 ? "M" : "L"}${x},${y}`;
+      })
+      .join(" ");
+  }
+
+  // Dark spot markers
+  const darkSpots = history
+    .map((d, i) => ({ i, dark: d.has_dark_spot }))
+    .filter((d) => d.dark);
+
+  return (
+    <div className="mb-4">
+      <div className="text-xs font-mono opacity-40 mb-1">C(x) Timeline</div>
+      <svg width={w} height={h} className="w-full" viewBox={`0 0 ${w} ${h}`}>
+        <path d={toPath("Cx")} fill="none" stroke="rgba(232,180,184,0.7)" strokeWidth="1.5" />
+        <path d={toPath("veritas_ratio")} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" strokeDasharray="3,3" />
+        {darkSpots.map((d) => {
+          const x = pad + (d.i / maxIdx) * (w - pad * 2);
+          return <circle key={d.i} cx={x} cy={h - pad - 2} r="2.5" fill="rgb(239,68,68)" opacity="0.7" />;
+        })}
+      </svg>
+      <div className="flex gap-3 text-[10px] font-mono opacity-30 mt-1">
+        <span style={{ color: "rgb(232,180,184)" }}>C(x)</span>
+        <span style={{ color: "rgba(255,255,255,0.4)" }}>veritas</span>
+        {darkSpots.length > 0 && <span style={{ color: "rgb(239,68,68)" }}>● dark spots</span>}
       </div>
     </div>
   );
 }
 
-function AlertCard({ alert, index }) {
-  const colors = {
-    high: { border: "border-rose-500/40", bg: "bg-rose-950/30", icon: "text-rose-400" },
-    moderate: { border: "border-amber-500/30", bg: "bg-amber-950/20", icon: "text-amber-400" },
-  };
-  const c = colors[alert.severity] || colors.moderate;
-
+// ─── Dark Spot Alert ─────────────────────────────────────────────
+function DarkSpotAlert({ cx }: { cx: CxReading }) {
+  if (!cx.has_dark_spot) return null;
   return (
-    <div
-      className={cn("border rounded-lg p-3 mb-2 transition-all duration-500", c.border, c.bg)}
-      style={{ animationDelay: `${index * 100}ms` }}
-    >
+    <div className="border border-rose-500/40 bg-rose-950/30 rounded-lg p-3 mb-4">
       <div className="flex items-start gap-2">
-        <span className={cn("text-sm mt-0.5", c.icon)}>
-          {alert.severity === "high" ? "◆" : "◇"}
-        </span>
+        <span className="text-rose-400 text-sm mt-0.5">◆</span>
         <div>
-          <div className="text-xs font-mono opacity-50 mb-1">
-            {alert.dimension} — {alert.type.replace("_", " ")}
-          </div>
+          <div className="text-xs font-mono text-rose-400 mb-1">DARK SPOT DETECTED</div>
           <p className="text-sm leading-relaxed opacity-80">
-            {alert.message}
+            C(x) ≈ {cx.Cx.toFixed(3)} with nonzero amplitudes. Zones are interfering
+            destructively. The quiet is signal.
           </p>
-          <div className="text-xs font-mono opacity-40 mt-1">
-            {alert.baseline?.toFixed(2)} → {alert.current?.toFixed(2)} ({alert.delta > 0 ? "+" : ""}{alert.delta?.toFixed(3)})
-          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function CoherenceGraph({ timeline }) {
-  if (!timeline || timeline.length < 2) return null;
-
-  const w = 280;
-  const h = 60;
-  const pad = 4;
-
-  function toPath(data, key) {
-    const maxIdx = data.length - 1;
-    return data
-      .map((d, i) => {
-        const x = pad + (i / maxIdx) * (w - pad * 2);
-        const y = h - pad - d[key] * (h - pad * 2);
-        return `${i === 0 ? "M" : "L"}${x},${y}`;
-      })
-      .join(" ");
-  }
-
+// ─── C(x) Dot on Messages ────────────────────────────────────────
+function CxDot({ cx }: { cx?: CxReading }) {
+  if (!cx) return null;
+  const color = cxColor(cx.Cx, cx.has_dark_spot);
   return (
-    <div className="mb-4">
-      <div className="text-xs font-mono opacity-40 mb-1">Coherence Timeline</div>
-      <svg width={w} height={h} className="w-full" viewBox={`0 0 ${w} ${h}`}>
-        <path d={toPath(timeline, "coherence")} fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5" />
-        <path d={toPath(timeline, "psi")} fill="none" stroke="rgba(147,197,253,0.5)" strokeWidth="1" />
-        <path d={toPath(timeline, "q")} fill="none" stroke="rgba(252,165,165,0.5)" strokeWidth="1" />
-        <path d={toPath(timeline, "rho")} fill="none" stroke="rgba(167,139,250,0.5)" strokeWidth="1" />
-        <path d={toPath(timeline, "f")} fill="none" stroke="rgba(134,239,172,0.5)" strokeWidth="1" />
-      </svg>
-      <div className="flex gap-3 text-[10px] font-mono opacity-30 mt-1">
-        <span style={{ color: "rgb(147,197,253)" }}>Ψ</span>
-        <span style={{ color: "rgb(167,139,250)" }}>ρ</span>
-        <span style={{ color: "rgb(252,165,165)" }}>q</span>
-        <span style={{ color: "rgb(134,239,172)" }}>f</span>
-        <span style={{ color: "rgba(255,255,255,0.5)" }}>C</span>
-      </div>
-    </div>
+    <span
+      className="inline-block w-2 h-2 rounded-full ml-2 align-middle"
+      style={{ background: color }}
+      title={`C(x)=${cx.Cx.toFixed(3)} τ=${cx.tau.toFixed(1)} veritas=${cx.veritas_ratio.toFixed(3)}${cx.has_dark_spot ? " [DARK SPOT]" : ""}`}
+    />
   );
 }
 
 // ─── Main Component ──────────────────────────────────────────────
 export default function RoseGlassChat() {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [lens, setLens] = useState("auto");
   const [sessionId] = useState(() => crypto.randomUUID());
-  const [perception, setPerception] = useState(null);
-  const [gradientHistory, setGradientHistory] = useState([]);
-  const [alerts, setAlerts] = useState([]);
+  const [cxHistory, setCxHistory] = useState<CxReading[]>([]);
+  const [latestCx, setLatestCx] = useState<CxReading | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [lensMenuOpen, setLensMenuOpen] = useState(false);
-  const messagesEndRef = useRef(null);
-  const inputRef = useRef(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-
-  // Perceive a message through the worker
-  const perceive = useCallback(async (text, role = "user") => {
-    try {
-      const res = await fetch(`${PERCEPTION_WORKER_URL}/perceive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, session_id: sessionId, lens, role }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (role === "user") {
-          setPerception(data.summary);
-          if (data.alerts?.length > 0) {
-            setAlerts(prev => [...prev, ...data.alerts]);
-          }
-          // Update gradient history
-          if (data.summary?.latest) {
-            setGradientHistory(prev => [...prev, {
-              psi: data.summary.latest.psi,
-              rho: data.summary.latest.rho,
-              q: data.summary.latest.q_optimized,
-              f: data.summary.latest.f,
-              tau: data.summary.latest.tau,
-              coherence: data.summary.latest.coherence,
-            }]);
-          }
-        }
-        return data;
-      }
-    } catch (e) {
-      console.error("Perception worker unavailable:", e);
-    }
-    return null;
-  }, [sessionId, lens]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
@@ -201,96 +196,60 @@ export default function RoseGlassChat() {
     setInput("");
     setLoading(true);
 
-    // Add user message
-    const userMsg = { role: "user", content: text, id: crypto.randomUUID() };
-    setMessages(prev => [...prev, userMsg]);
-
-    // Perceive user message (fire and forget, don't block)
-    perceive(text, "user");
+    const userMsg: ChatMessage = { role: "user", content: text, id: crypto.randomUUID() };
+    setMessages((prev) => [...prev, userMsg]);
 
     try {
-      // Build conversation history for Claude
-      const history = messages.map(m => ({ role: m.role, content: m.content }));
-
-      // Build perception context for system prompt
-      let perceptionContext = "";
-      if (perception?.latest) {
-        const p = perception.latest;
-        const g = perception.gradients || {};
-        perceptionContext = `
-
-[ROSE GLASS PERCEPTION STATE — message ${perception.message_count || 0}]
-Current dimensional readings:
-  Ψ (consistency): ${p.psi} ${g.psi ? `(Δ${g.psi > 0 ? "+" : ""}${g.psi})` : ""}
-  ρ (wisdom depth): ${p.rho} ${g.rho ? `(Δ${g.rho > 0 ? "+" : ""}${g.rho})` : ""}
-  q (activation): ${p.q_optimized} ${g.q ? `(Δ${g.q > 0 ? "+" : ""}${g.q})` : ""}
-  f (social): ${p.f} ${g.f ? `(Δ${g.f > 0 ? "+" : ""}${g.f})` : ""}
-  τ (temporal): ${p.tau}
-  C (coherence): ${p.coherence}
-  λ (interference): ${p.lambda}
-Lens: ${lens}
-${alerts.length > 0 ? `\nRecent alerts:\n${alerts.slice(-3).map(a => `  ${a.dimension}: ${a.message}`).join("\n")}` : ""}
-`;
-      }
-
-      const systemPrompt = `You are the intelligence behind roseglass.chat — a cognitive mirror for people making complex, high-stakes decisions.
-
-Your role: Have an excellent, substantive conversation with the user about whatever they want to discuss. You are a brilliant thinking partner. You do NOT mention Rose Glass, dimensions, coherence scores, or any framework mechanics unless the user specifically asks about them.
-
-You have access to real-time Rose Glass perception data about the user's communication patterns across this conversation. Use this data SILENTLY to:
-- Notice when the user's reasoning shifts (but don't announce it mechanically)
-- Adjust your depth and directness based on their coherence state
-- If you detect a significant pattern shift, you may gently surface an observation — not as a score report, but as a natural conversational insight. For example: "I notice you shifted from a structural analysis to a more conviction-driven frame — is that intentional?" rather than "Your Ψ dropped 0.15 points."
-
-The user chose the lens: ${LENS_OPTIONS.find(l => l.id === lens)?.name || "Auto-Calibrating"}. This tells you something about how they want to think. Respect it.
-
-You are speaking to someone who values intelligence, directness, and real insight over performance. Don't pad. Don't hedge unnecessarily. Match their level.
-${perceptionContext}`;
-
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/roseglass-chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 4096,
-          system: systemPrompt,
-          messages: [
-            ...history,
-            { role: "user", content: text },
-          ],
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({ session_id: sessionId, message: text }),
       });
 
       const data = await res.json();
-      const responseText = data.content?.find(b => b.type === "text")?.text || "Error processing response.";
 
-      const assistantMsg = { role: "assistant", content: responseText, id: crypto.randomUUID() };
-      setMessages(prev => [...prev, assistantMsg]);
+      if (data.error) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `Error: ${data.error}`, id: crypto.randomUUID() },
+        ]);
+      } else {
+        const cx: CxReading = data.cx;
+        setLatestCx(cx);
+        setCxHistory((prev) => [...prev, cx]);
 
-      // Perceive assistant response too (for complete tracking)
-      perceive(responseText, "assistant");
+        // Update user message with cx reading
+        setMessages((prev) =>
+          prev.map((m) => (m.id === userMsg.id ? { ...m, cx } : m))
+        );
 
+        const assistantMsg: ChatMessage = {
+          role: "assistant",
+          content: data.content,
+          id: crypto.randomUUID(),
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+      }
     } catch (e) {
       console.error("Chat error:", e);
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: "Connection error. Please try again.",
-        id: crypto.randomUUID(),
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Connection error. Please try again.", id: crypto.randomUUID() },
+      ]);
     }
 
     setLoading(false);
-  }, [input, loading, messages, perception, alerts, lens, perceive]);
+  }, [input, loading, sessionId]);
 
-  const handleKeyDown = (e) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
   };
-
-  const currentLens = LENS_OPTIONS.find(l => l.id === lens);
-  const latestAlerts = alerts.slice(-5);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden" style={{ background: "#0a0a0c", color: "#e2e0dc" }}>
@@ -303,50 +262,20 @@ ${perceptionContext}`;
             <h1 className="text-base tracking-wide" style={{ fontFamily: "'Crimson Text', Georgia, serif" }}>
               roseglass<span className="opacity-40">.chat</span>
             </h1>
+            {latestCx && (
+              <span className="text-xs font-mono opacity-40 ml-2">
+                C(x)={latestCx.Cx.toFixed(3)}
+                <span className="ml-1.5">τ={latestCx.tau.toFixed(1)}</span>
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-4">
-            {/* Lens Selector */}
-            <div className="relative">
-              <button
-                onClick={() => setLensMenuOpen(!lensMenuOpen)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-mono transition-all hover:bg-white/5"
-                style={{ border: "1px solid rgba(255,255,255,0.08)" }}
-              >
-                <span className="opacity-40">lens:</span>
-                <span>{currentLens?.short}</span>
-                <span className="opacity-30">▾</span>
-              </button>
-
-              {lensMenuOpen && (
-                <div
-                  className="absolute right-0 top-full mt-1 w-64 rounded-lg shadow-2xl z-50 py-1 border"
-                  style={{ background: "#141418", borderColor: "rgba(255,255,255,0.08)" }}
-                >
-                  {LENS_OPTIONS.map(l => (
-                    <button
-                      key={l.id}
-                      onClick={() => { setLens(l.id); setLensMenuOpen(false); }}
-                      className={cn(
-                        "w-full text-left px-4 py-2.5 text-sm transition-all hover:bg-white/5",
-                        lens === l.id && "bg-white/5"
-                      )}
-                    >
-                      <div className="font-medium text-xs">{l.name}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Sidebar Toggle */}
-            <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono opacity-50 hover:opacity-80"
-            >
-              {sidebarOpen ? "◨" : "◧"}
-            </button>
-          </div>
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono opacity-50 hover:opacity-80"
+          >
+            {sidebarOpen ? "◨" : "◧"}
+          </button>
         </header>
 
         {/* Messages */}
@@ -355,33 +284,28 @@ ${perceptionContext}`;
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-md">
                 <div className="text-2xl mb-4 opacity-20" style={{ fontFamily: "'Crimson Text', Georgia, serif" }}>
-                  A distillation of your thoughts.
+                  The lens is not the light.
                 </div>
                 <p className="text-sm opacity-30 leading-relaxed">
-                  Think out loud about a complex decision. Rose Glass tracks your coherence in real time —
-                  not to judge, but to show you where your reasoning shifts under pressure.
+                  Every message is perceived through four Fresnel zones. The interference
+                  pattern tells the model what it cannot see on the surface.
                 </p>
                 <p className="text-xs opacity-20 mt-4 font-mono">
-                  Select a lens above to calibrate perception.
+                  Dark spots are where the signal is.
                 </p>
               </div>
             </div>
           )}
 
-          {messages.map(msg => (
+          {messages.map((msg) => (
             <div
               key={msg.id}
-              className={cn(
-                "max-w-2xl",
-                msg.role === "user" ? "ml-auto" : "mr-auto"
-              )}
+              className={cn("max-w-2xl", msg.role === "user" ? "ml-auto" : "mr-auto")}
             >
               <div
                 className={cn(
                   "rounded-xl px-4 py-3 text-sm leading-relaxed",
-                  msg.role === "user"
-                    ? "bg-white/5 border border-white/8"
-                    : ""
+                  msg.role === "user" ? "bg-white/5 border border-white/8" : ""
                 )}
                 style={{
                   fontFamily: msg.role === "assistant" ? "'Crimson Text', Georgia, serif" : "inherit",
@@ -395,6 +319,14 @@ ${perceptionContext}`;
                   </p>
                 ))}
               </div>
+              {msg.role === "user" && msg.cx && (
+                <div className="flex items-center justify-end mt-1 gap-1.5">
+                  <CxDot cx={msg.cx} />
+                  <span className="text-[10px] font-mono opacity-25">
+                    {msg.cx.Cx.toFixed(3)}
+                  </span>
+                </div>
+              )}
             </div>
           ))}
 
@@ -417,19 +349,16 @@ ${perceptionContext}`;
             <textarea
               ref={inputRef}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Think out loud..."
+              placeholder="Say something real..."
               rows={1}
               className="flex-1 resize-none rounded-xl px-4 py-3 text-sm bg-white/5 border border-white/8 placeholder-white/20 focus:outline-none focus:border-white/15 transition-all"
-              style={{
-                minHeight: "44px",
-                maxHeight: "200px",
-                fontFamily: "inherit",
-              }}
-              onInput={e => {
-                e.target.style.height = "44px";
-                e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px";
+              style={{ minHeight: "44px", maxHeight: "200px" }}
+              onInput={(e) => {
+                const t = e.target as HTMLTextAreaElement;
+                t.style.height = "44px";
+                t.style.height = Math.min(t.scrollHeight, 200) + "px";
               }}
             />
             <button
@@ -447,89 +376,80 @@ ${perceptionContext}`;
         </div>
       </div>
 
-      {/* ─── Perception Sidebar ─── */}
+      {/* ─── Topology Sidebar ─── */}
       {sidebarOpen && (
         <aside
           className="w-72 border-l overflow-y-auto flex-shrink-0"
           style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.01)" }}
         >
           <div className="p-4">
-            <div className="text-xs font-mono opacity-30 mb-4 tracking-widest">PERCEPTION</div>
+            <div className="text-xs font-mono opacity-30 mb-4 tracking-widest">TOPOLOGY</div>
 
-            {/* Coherence Graph */}
-            <CoherenceGraph timeline={gradientHistory} />
+            {/* C(x) Sparkline */}
+            <CxSparkline history={cxHistory} />
 
-            {/* Current Dimensions */}
-            {perception?.latest ? (
+            {/* Current Reading */}
+            {latestCx ? (
               <div className="mb-6">
-                <DimensionBar
-                  label="consistency" symbol="Ψ"
-                  value={perception.latest.psi}
-                  baseline={perception.baseline?.psi}
-                  gradient={perception.gradients?.psi}
-                  color="rgb(147,197,253)"
-                />
-                <DimensionBar
-                  label="wisdom" symbol="ρ"
-                  value={perception.latest.rho}
-                  baseline={perception.baseline?.rho}
-                  gradient={perception.gradients?.rho}
-                  color="rgb(167,139,250)"
-                />
-                <DimensionBar
-                  label="activation" symbol="q"
-                  value={perception.latest.q_optimized}
-                  baseline={perception.baseline?.q}
-                  gradient={perception.gradients?.q}
-                  color="rgb(252,165,165)"
-                />
-                <DimensionBar
-                  label="social" symbol="f"
-                  value={perception.latest.f}
-                  baseline={perception.baseline?.f}
-                  gradient={perception.gradients?.f}
-                  color="rgb(134,239,172)"
-                />
-                <DimensionBar
-                  label="temporal" symbol="τ"
-                  value={perception.latest.tau}
-                  baseline={perception.baseline?.tau}
-                  gradient={perception.gradients?.tau}
-                  color="rgb(253,224,71)"
-                />
+                {/* C(x) Value */}
+                <div className="text-center mb-4">
+                  <div
+                    className="text-3xl italic"
+                    style={{
+                      fontFamily: "'Crimson Text', Georgia, serif",
+                      color: cxColor(latestCx.Cx, latestCx.has_dark_spot),
+                    }}
+                  >
+                    {latestCx.Cx.toFixed(4)}
+                  </div>
+                  <div className="text-[10px] font-mono opacity-30 mt-1">
+                    C(x, τ={latestCx.tau.toFixed(1)}, λ=1.0)
+                  </div>
+                </div>
 
+                {/* Dark Spot Alert */}
+                <DarkSpotAlert cx={latestCx} />
+
+                {/* Zone Bars */}
+                <ZoneBar zoneKey="q" reading={latestCx.zones.q} />
+                <ZoneBar zoneKey="f" reading={latestCx.zones.f} />
+                <ZoneBar zoneKey="rho" reading={latestCx.zones.rho} />
+                <ZoneBar zoneKey="psi" reading={latestCx.zones.psi} />
+
+                {/* Veritas + τ */}
                 <div className="mt-4 pt-3 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
                   <div className="flex justify-between text-xs font-mono">
-                    <span className="opacity-40">coherence</span>
-                    <span>{perception.latest.coherence.toFixed(2)}</span>
+                    <span className="opacity-40">veritas</span>
+                    <span>{latestCx.veritas_ratio.toFixed(4)}</span>
                   </div>
                   <div className="flex justify-between text-xs font-mono mt-1">
-                    <span className="opacity-40">λ interference</span>
-                    <span>{perception.latest.lambda.toFixed(3)}</span>
+                    <span className="opacity-40">τ depth</span>
+                    <span>
+                      {latestCx.tau.toFixed(1)}
+                      {latestCx.tau < 1.5 && (
+                        <span className="opacity-30 ml-1">shallow</span>
+                      )}
+                      {latestCx.tau >= 1.5 && latestCx.tau < 2.5 && (
+                        <span className="opacity-30 ml-1">mid</span>
+                      )}
+                      {latestCx.tau >= 2.5 && (
+                        <span className="opacity-30 ml-1">deep</span>
+                      )}
+                    </span>
                   </div>
                 </div>
               </div>
             ) : (
               <div className="text-xs opacity-20 text-center py-8">
-                Perception begins with your first message.
-              </div>
-            )}
-
-            {/* Alerts */}
-            {latestAlerts.length > 0 && (
-              <div>
-                <div className="text-xs font-mono opacity-30 mb-2 tracking-widest">PATTERN ALERTS</div>
-                {latestAlerts.map((alert, i) => (
-                  <AlertCard key={i} alert={alert} index={i} />
-                ))}
+                Topology emerges with your first message.
               </div>
             )}
 
             {/* Session Info */}
             <div className="mt-6 pt-3 border-t text-xs font-mono opacity-20" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-              <div>messages: {messages.filter(m => m.role === "user").length}</div>
-              <div>alerts: {alerts.length}</div>
-              <div>lens: {currentLens?.name}</div>
+              <div>messages: {messages.filter((m) => m.role === "user").length}</div>
+              <div>readings: {cxHistory.length}</div>
+              <div>dark spots: {cxHistory.filter((c) => c.has_dark_spot).length}</div>
             </div>
           </div>
         </aside>
