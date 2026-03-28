@@ -178,16 +178,72 @@ export default function RoseGlassChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId] = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId] = useState<string>("");
+  const [hydrated, setHydrated] = useState(false);
   const [cxHistory, setCxHistory] = useState<CxReading[]>([]);
   const [latestCx, setLatestCx] = useState<CxReading | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Fix 1: Session ID from localStorage, not server render
+  useEffect(() => {
+    const KEY = "roseglass-session-id";
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(KEY, id);
+    }
+    setSessionId(id);
+    setHydrated(true);
+  }, []);
+
+  // Fix 3: Restore history from DB on mount
+  useEffect(() => {
+    if (!sessionId) return;
+    async function restore() {
+      try {
+        const [msgRes, cxRes] = await Promise.all([
+          fetch(
+            `${SUPABASE_URL}/rest/v1/chat_messages?session_id=eq.${sessionId}&order=created_at.asc&select=id,role,content`,
+            { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } },
+          ),
+          fetch(
+            `${SUPABASE_URL}/rest/v1/coherence_readings?session_id=eq.${sessionId}&order=created_at.asc&select=cx,tau,lambda,veritas_ratio,has_dark_spot,zone_detail`,
+            { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } },
+          ),
+        ]);
+        const msgs = await msgRes.json();
+        const cxs = await cxRes.json();
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          setMessages(msgs.map((m: { id: string; role: "user" | "assistant"; content: string }) => ({
+            id: m.id, role: m.role, content: m.content,
+          })));
+        }
+        if (Array.isArray(cxs) && cxs.length > 0) {
+          const readings: CxReading[] = cxs.map((r: Record<string, unknown>) => ({
+            Cx: Number(r.cx), tau: Number(r.tau), lambda: Number(r.lambda),
+            veritas_ratio: Number(r.veritas_ratio), has_dark_spot: Boolean(r.has_dark_spot),
+            zones: (r.zone_detail as Record<string, ZoneReading>) || {},
+          }));
+          setCxHistory(readings);
+          setLatestCx(readings[readings.length - 1]);
+        }
+      } catch (e) {
+        console.error("History restore failed:", e);
+      }
+    }
+    restore();
+  }, [sessionId]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const startNewSession = useCallback(() => {
+    localStorage.removeItem("roseglass-session-id");
+    window.location.reload();
+  }, []);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
@@ -251,6 +307,15 @@ export default function RoseGlassChat() {
     }
   };
 
+  if (!hydrated) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center"
+           style={{ background: "#0a0a0c", color: "#e2e0dc" }}>
+        <span className="text-xs font-mono opacity-40">initializing...</span>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden" style={{ background: "#0a0a0c", color: "#e2e0dc" }}>
       {/* ─── Main Chat Area ─── */}
@@ -270,12 +335,20 @@ export default function RoseGlassChat() {
             )}
           </div>
 
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono opacity-50 hover:opacity-80"
-          >
-            {sidebarOpen ? "◨" : "◧"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={startNewSession}
+              className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono opacity-50 hover:opacity-80"
+            >
+              + new
+            </button>
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono opacity-50 hover:opacity-80"
+            >
+              {sidebarOpen ? "◨" : "◧"}
+            </button>
+          </div>
         </header>
 
         {/* Messages */}
