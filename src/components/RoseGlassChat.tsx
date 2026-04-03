@@ -1,10 +1,14 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 
 /*
- * roseglass.chat — C(x) Diffractive Chat Interface (WP-2026-007)
- * Design: editorial minimalism meets scientific instrument.
+ * roseglass.chat — v2 "The Honest Friend"
+ * Warm, present, alive. The flower to the pollinator.
+ *
+ * Color algorithm: "The Pendant"
+ * Inspired by Christopher's poem — each zone voices a color,
+ * blended by amplitude, deepened by wisdom, clarified by language.
  */
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://boupwgkkzexwisctrhdr.supabase.co";
@@ -23,46 +27,169 @@ interface ChatMessage {
 
 // ─── Utility ─────────────────────────────────────────────────────
 function cn(...c: (string | false | undefined | null)[]) { return c.filter(Boolean).join(" "); }
-function radToDeg(phi: number) { return (phi * 180 / Math.PI).toFixed(0); }
-function isDestructive(phi: number) { return Math.abs(phi) > Math.PI * 0.4; }
-function cxColor(cx: number, dark: boolean): string {
-  if (dark) return "var(--signal-destructive)";
-  if (cx > 0.6) return "var(--signal-constructive)";
-  if (cx > 0.3) return "var(--signal-partial)";
-  return "#fb923c";
+
+// ─── The Pendant Algorithm ───────────────────────────────────────
+// "When people ask me what does my pendant do,
+//  I will respond with only the truth."
+//
+// Each zone contributes a hue, weighted by its amplitude.
+// Phase determines the mood of that hue:
+//   constructive (φ < ~72°) → warm/positive color
+//   destructive (φ > ~72°)  → deep/troubled color
+//
+// q (sentiment):   constructive → warm gold (40°)   | destructive → purple/lavender (280°)
+// f (belonging):   constructive → green (140°)       | destructive → deep blue (220°)
+// ρ (wisdom):      enriches saturation (depth of knowing)
+// Ψ (linguistic):  brightens/clarifies (clarity of expression)
+//
+// Dark spot: pendant dims — pulsing, desaturated, signals canceling beneath.
+// C(x): overall glow intensity.
+
+const DESTRUCTIVE_THRESHOLD = Math.PI * 0.4; // ~72°
+
+interface ZoneColor {
+  hue: number;
+  weight: number;
 }
 
-// ─── Zone Bar ────────────────────────────────────────────────────
-const ZONE_META: Record<string, { label: string; symbol: string; color: string }> = {
-  q:   { label: "Sentiment",  symbol: "q", color: "var(--zone-q)" },
-  f:   { label: "Belonging",  symbol: "f", color: "var(--zone-f)" },
-  rho: { label: "Wisdom",     symbol: "ρ", color: "var(--zone-rho)" },
-  psi: { label: "Linguistic", symbol: "Ψ", color: "var(--zone-psi)" },
-};
+function pendantColor(cx: CxReading | null): {
+  hue: number; sat: number; light: number; opacity: number; isDark: boolean;
+} {
+  if (!cx || cx.Cx === 0) return { hue: 0, sat: 0, light: 0, opacity: 0, isDark: false };
 
-function ZoneBar({ zoneKey, reading }: { zoneKey: string; reading: ZoneReading }) {
-  const meta = ZONE_META[zoneKey];
-  if (!meta) return null;
-  const w = Math.max(2, Math.min(100, reading.A * 100));
-  const dest = isDestructive(reading.phi);
+  const { Cx, has_dark_spot, zones } = cx;
+  const q = zones.q || { A: 0, phi: 0 };
+  const f = zones.f || { A: 0, phi: 0 };
+  const rho = zones.rho || { A: 0, phi: 0 };
+  const psi = zones.psi || { A: 0, phi: 0 };
+
+  // Each zone voices a hue based on its phase
+  const isDestructive = (phi: number) => Math.abs(phi) > DESTRUCTIVE_THRESHOLD;
+
+  const zoneColors: ZoneColor[] = [];
+
+  // q: sentiment → gold (warmth) or purple (hurt)
+  if (q.A > 0.01) {
+    const hue = isDestructive(q.phi) ? 280 : 40; // purple or gold
+    zoneColors.push({ hue, weight: q.A });
+  }
+
+  // f: belonging → green (gentle) or blue (sad/isolated)
+  if (f.A > 0.01) {
+    const hue = isDestructive(f.phi) ? 220 : 140; // blue or green
+    zoneColors.push({ hue, weight: f.A });
+  }
+
+  // ρ and Ψ contribute subtle hue when they're the dominant voice
+  // ρ: deep knowing → amber/teal depending on phase
+  if (rho.A > 0.05) {
+    const hue = isDestructive(rho.phi) ? 190 : 25; // teal or deep amber
+    zoneColors.push({ hue, weight: rho.A * 0.5 }); // half weight — ρ deepens more than it colors
+  }
+
+  // Ψ: linguistic precision → silver-blue or soft white-gold
+  if (psi.A > 0.05) {
+    const hue = isDestructive(psi.phi) ? 240 : 55; // indigo or pale gold
+    zoneColors.push({ hue, weight: psi.A * 0.3 }); // lightest touch
+  }
+
+  // Weighted circular mean of hues (they wrap at 360°)
+  let sinSum = 0, cosSum = 0, totalWeight = 0;
+  for (const zc of zoneColors) {
+    const rad = (zc.hue * Math.PI) / 180;
+    sinSum += Math.sin(rad) * zc.weight;
+    cosSum += Math.cos(rad) * zc.weight;
+    totalWeight += zc.weight;
+  }
+
+  let hue: number;
+  if (totalWeight < 0.01) {
+    // No zone is active enough — default warm neutral
+    hue = 30;
+  } else {
+    hue = (Math.atan2(sinSum / totalWeight, cosSum / totalWeight) * 180) / Math.PI;
+    if (hue < 0) hue += 360;
+  }
+
+  // Saturation: boosted by ρ (wisdom = depth of color) + base from Cx
+  const baseSat = 25 + Cx * 35;           // 25% → 60%
+  const wisdomBoost = rho.A * 25;          // up to +25%
+  const sat = Math.min(80, baseSat + wisdomBoost);
+
+  // Lightness: boosted by Ψ (linguistic clarity = brightness) + base from Cx
+  const baseLight = 10 + Cx * 18;          // 10% → 28%
+  const clarityBoost = psi.A * 10;         // up to +10%
+  const light = Math.min(35, baseLight + clarityBoost);
+
+  // Opacity: from overall coherence
+  const opacity = Math.min(0.9, 0.3 + Cx * 0.65);
+
+  // Dark spot: pendant dims
+  if (has_dark_spot) {
+    return {
+      hue,
+      sat: Math.max(8, sat * 0.3),   // desaturated
+      light: Math.max(5, light * 0.4), // dimmed
+      opacity: 0.4 + Math.sin(Date.now() / 1000) * 0.15, // subtle pulse
+      isDark: true,
+    };
+  }
+
+  return { hue: Math.round(hue), sat: Math.round(sat), light: Math.round(light), opacity, isDark: false };
+}
+
+function ambientBackground(cx: CxReading | null): string {
+  const base = "#0a0a0e";
+  const p = pendantColor(cx);
+  if (p.opacity === 0) return base;
+
+  const { hue, sat, light, opacity } = p;
+  const glowColor = `hsla(${hue}, ${sat}%, ${light}%, ${opacity})`;
+
+  // Primary: large glow from bottom center
+  // Secondary: subtler echo from top — the pendant illuminates the whole space
+  return `radial-gradient(ellipse 100% 60% at 50% 100%, ${glowColor} 0%, transparent 70%), radial-gradient(ellipse 70% 45% at 50% 0%, hsla(${hue}, ${Math.round(sat * 0.5)}%, ${Math.round(light * 0.6)}%, ${(opacity * 0.35).toFixed(2)}) 0%, transparent 55%), ${base}`;
+}
+
+// ─── First message seed themes (for variation) ───────────────────
+const FIRST_MESSAGE_SEEDS = [
+  "certainty-performance",
+  "silence-as-language",
+  "the-weight-of-unsaid-things",
+  "half-formed-thoughts",
+  "the-space-between-knowing",
+  "what-clarity-actually-feels-like",
+  "the-difference-between-fixing-and-witnessing",
+  "when-confusion-is-the-honest-answer",
+  "the-courage-of-not-having-an-opinion",
+  "what-you-notice-when-you-stop-performing",
+  "the-texture-of-real-attention",
+  "being-comfortable-with-the-unresolved",
+];
+
+function getRandomSeed(): string {
+  return FIRST_MESSAGE_SEEDS[Math.floor(Math.random() * FIRST_MESSAGE_SEEDS.length)];
+}
+
+// ─── Presence Indicator (replaces zone bars for public view) ─────
+function PresenceIndicator({ cx }: { cx: CxReading | null }) {
+  if (!cx) return null;
+  const zones = [
+    { key: "q", A: cx.zones.q?.A || 0, color: "#d4916b" },
+    { key: "f", A: cx.zones.f?.A || 0, color: "#6fa8b8" },
+    { key: "rho", A: cx.zones.rho?.A || 0, color: "#b09ada" },
+    { key: "psi", A: cx.zones.psi?.A || 0, color: "#8cb89a" },
+  ];
   return (
-    <div className="mb-3">
-      <div className="flex justify-between items-center mb-1">
-        <span className="text-xs font-mono" style={{ color: "var(--text-secondary)" }}>
-          {meta.symbol} <span style={{ color: "var(--text-tertiary)" }}>{meta.label}</span>
-        </span>
-        <span className="text-xs font-mono">
-          {reading.A.toFixed(2)}
-          <span className={cn("ml-1.5")} style={{ color: dest ? "var(--signal-destructive)" : "var(--text-tertiary)" }}>
-            φ={radToDeg(reading.phi)}°
-          </span>
-        </span>
-      </div>
-      <div className="relative h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-surface)" }}>
-        <div className="absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out"
-             style={{ width: `${w}%`, background: meta.color, opacity: dest ? 0.35 : 1 }} />
-      </div>
-      {dest && <div className="text-[9px] font-mono mt-0.5" style={{ color: "var(--signal-destructive)", opacity: 0.6 }}>DESTRUCTIVE</div>}
+    <div className="flex gap-1 items-end h-5">
+      {zones.map(z => (
+        <div key={z.key} className="w-1.5 rounded-full transition-all duration-[2000ms] ease-out"
+             style={{
+               height: `${Math.max(3, z.A * 20)}px`,
+               background: z.color,
+               opacity: Math.max(0.15, z.A),
+             }} />
+      ))}
     </div>
   );
 }
@@ -70,362 +197,362 @@ function ZoneBar({ zoneKey, reading }: { zoneKey: string; reading: ZoneReading }
 // ─── C(x) Sparkline ──────────────────────────────────────────────
 function CxSparkline({ history }: { history: CxReading[] }) {
   if (history.length < 2) return null;
-  const w = 280, h = 60, pad = 4, maxIdx = history.length - 1;
-  function toPath(key: "Cx" | "veritas_ratio") {
-    return history.map((d, i) => {
-      const x = pad + (i / maxIdx) * (w - pad * 2);
-      const y = h - pad - Math.min(1, key === "Cx" ? d.Cx : d.veritas_ratio) * (h - pad * 2);
-      return `${i === 0 ? "M" : "L"}${x},${y}`;
-    }).join(" ");
-  }
-  const darks = history.map((d, i) => ({ i, dark: d.has_dark_spot })).filter(d => d.dark);
+  const maxCx = Math.max(...history.map(h => h.Cx), 0.5);
+  const w = 180, h = 40;
+  const points = history.map((cx, i) => {
+    const x = (i / (history.length - 1)) * w;
+    const y = h - (cx.Cx / maxCx) * h;
+    return `${x},${y}`;
+  }).join(" ");
   return (
-    <div className="mb-4">
-      <div className="text-xs font-mono mb-1" style={{ color: "var(--text-tertiary)" }}>C(x) Timeline</div>
-      <svg width={w} height={h} className="w-full" viewBox={`0 0 ${w} ${h}`}>
-        <path d={toPath("Cx")} fill="none" stroke="var(--zone-q)" strokeWidth="1.5" opacity="0.7" />
-        <path d={toPath("veritas_ratio")} fill="none" stroke="var(--text-ghost)" strokeWidth="1" strokeDasharray="3,3" />
-        {darks.map(d => <circle key={d.i} cx={pad + (d.i / maxIdx) * (w - pad * 2)} cy={h - pad - 2} r="2.5" fill="var(--signal-destructive)" opacity="0.7" />)}
-      </svg>
-    </div>
+    <svg width={w} height={h} className="mx-auto opacity-60">
+      <polyline points={points} fill="none" stroke="var(--accent)" strokeWidth="1.5"
+                strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
-// ─── Dark Spot Alert ─────────────────────────────────────────────
-function DarkSpotAlert({ cx }: { cx: CxReading }) {
-  if (!cx.has_dark_spot) return null;
-  return (
-    <div className="rounded-lg p-3 mb-4" style={{ border: "1px solid rgba(232,93,111,0.3)", background: "rgba(232,93,111,0.06)" }}>
-      <div className="flex items-start gap-2">
-        <span style={{ color: "var(--signal-destructive)" }} className="text-sm mt-0.5">◆</span>
-        <div>
-          <div className="text-xs font-mono mb-1" style={{ color: "var(--signal-destructive)" }}>DARK SPOT</div>
-          <p className="text-sm leading-relaxed" style={{ color: "var(--text-secondary)" }}>
-            C(x) ≈ {cx.Cx.toFixed(3)}. Zones interfering destructively. The quiet is signal.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── C(x) Dot ────────────────────────────────────────────────────
-function CxDot({ cx }: { cx?: CxReading }) {
-  if (!cx) return null;
-  return (
-    <span className="inline-block w-2 h-2 rounded-full ml-2 align-middle"
-          style={{ background: cxColor(cx.Cx, cx.has_dark_spot) }}
-          title={`C(x)=${cx.Cx.toFixed(3)} τ=${cx.tau.toFixed(1)} V=${cx.veritas_ratio.toFixed(3)}`} />
-  );
-}
-
-// ─── Topology Content (shared between sidebar and bottom sheet) ──
-function TopologyContent({ latestCx, cxHistory, messages }: {
-  latestCx: CxReading | null; cxHistory: CxReading[]; messages: ChatMessage[];
+// ─── Topology Detail Panel ───────────────────────────────────────
+function TopologyDetail({ cx, cxHistory, messages }: {
+  cx: CxReading | null; cxHistory: CxReading[]; messages: ChatMessage[];
 }) {
+  if (!cx) return <div className="text-xs italic" style={{ color: "var(--text-ghost)" }}>Waiting to listen.</div>;
+  const zoneLabels: Record<string, string> = { q: "sentiment", f: "belonging", rho: "wisdom", psi: "linguistic" };
   return (
-    <>
-      <div className="text-xs font-mono mb-4 tracking-widest" style={{ color: "var(--text-tertiary)" }}>TOPOLOGY</div>
-      <CxSparkline history={cxHistory} />
-      {latestCx ? (
-        <div className="mb-6">
-          <div className="text-center mb-6 py-4">
-            <div className="text-4xl font-light italic tracking-wide"
-                 style={{
-                   fontFamily: "var(--font-serif)",
-                   color: cxColor(latestCx.Cx, latestCx.has_dark_spot),
-                   textShadow: latestCx.Cx > 0.5 ? `0 0 30px ${cxColor(latestCx.Cx, latestCx.has_dark_spot)}33` : "none",
-                   transition: "all 0.8s ease-out",
-                 }}>
-              {latestCx.Cx.toFixed(4)}
-            </div>
-            <div className="text-[10px] font-mono mt-2" style={{ color: "var(--text-tertiary)" }}>
-              C(x, τ={latestCx.tau.toFixed(1)}, λ=1.0)
-            </div>
-          </div>
-          <DarkSpotAlert cx={latestCx} />
-          <ZoneBar zoneKey="q" reading={latestCx.zones.q} />
-          <ZoneBar zoneKey="f" reading={latestCx.zones.f} />
-          <ZoneBar zoneKey="rho" reading={latestCx.zones.rho} />
-          <ZoneBar zoneKey="psi" reading={latestCx.zones.psi} />
-          <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--border-subtle)" }}>
-            <div className="flex justify-between text-xs font-mono">
-              <span style={{ color: "var(--text-tertiary)" }}>veritas</span>
-              <span>{latestCx.veritas_ratio.toFixed(4)}</span>
-            </div>
-            <div className="flex justify-between text-xs font-mono mt-1">
-              <span style={{ color: "var(--text-tertiary)" }}>τ depth</span>
-              <span>
-                {latestCx.tau.toFixed(1)}
-                <span className="ml-1" style={{ color: "var(--text-tertiary)" }}>
-                  {latestCx.tau < 1.5 ? "shallow" : latestCx.tau < 2.5 ? "mid" : "deep"}
-                </span>
-              </span>
-            </div>
-          </div>
+    <div className="space-y-4 text-[10px] font-mono" style={{ color: "var(--text-ghost)" }}>
+      <div className="text-center">
+        <div className="text-2xl font-light italic" style={{ fontFamily: "var(--font-serif)", color: "var(--accent)" }}>
+          {cx.Cx.toFixed(4)}
         </div>
-      ) : (
-        <div className="text-xs text-center py-8" style={{ color: "var(--text-ghost)" }}>
-          Topology emerges with your first message.
-        </div>
-      )}
-      <div className="mt-6 pt-3 text-xs font-mono" style={{ borderTop: "1px solid var(--border-subtle)", color: "var(--text-ghost)" }}>
-        <div>messages: {messages.filter(m => m.role === "user").length}</div>
-        <div>readings: {cxHistory.length}</div>
-        <div>dark spots: {cxHistory.filter(c => c.has_dark_spot).length}</div>
+        <div className="mt-1">coherence · τ={cx.tau.toFixed(1)} · λ=1.0</div>
+        <div className="mt-1">veritas: {cx.veritas_ratio.toFixed(4)}</div>
       </div>
-    </>
+      <CxSparkline history={cxHistory} />
+      <div className="space-y-1.5">
+        {Object.entries(cx.zones).map(([key, z]) => (
+          <div key={key} className="flex items-center gap-2">
+            <span className="w-16 text-right">{zoneLabels[key] || key}</span>
+            <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ background: "var(--bg-tertiary)" }}>
+              <div className="h-full rounded-full transition-all duration-[2000ms]"
+                   style={{ width: `${z.A * 100}%`, background: "var(--accent)", opacity: Math.max(0.3, z.A) }} />
+            </div>
+            <span className="w-10 text-right">{z.A.toFixed(3)}</span>
+            <span className="w-8 text-right">{(z.phi * 180 / Math.PI).toFixed(0)}°</span>
+          </div>
+        ))}
+      </div>
+      {cx.has_dark_spot && (
+        <div className="text-center italic" style={{ color: "var(--signal-destructive)" }}>dark spot detected</div>
+      )}
+      <div className="pt-2" style={{ borderTop: "1px solid var(--border-subtle)" }}>
+        <div className="flex justify-between"><span>exchanges</span><span>{messages.filter(m => m.role === "user").length}</span></div>
+      </div>
+    </div>
   );
 }
 
-// ─── Main Component ──────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// ─── Main Component ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
 export default function RoseGlassChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>("");
-  const [hydrated, setHydrated] = useState(false);
-  const [cxHistory, setCxHistory] = useState<CxReading[]>([]);
   const [latestCx, setLatestCx] = useState<CxReading | null>(null);
+  const [cxHistory, setCxHistory] = useState<CxReading[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showDetail, setShowDetail] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Hydration + session from localStorage
-  useEffect(() => {
-    const KEY = "roseglass-session-id";
-    let id = localStorage.getItem(KEY);
-    if (!id) { id = crypto.randomUUID(); localStorage.setItem(KEY, id); }
-    setSessionId(id);
-    setHydrated(true);
-  }, []);
+  const bgStyle = useMemo(() => ambientBackground(latestCx), [latestCx]);
 
-  // Mobile detection
+  useEffect(() => { setHydrated(true); }, []);
   useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth < 768);
-    check();
-    window.addEventListener("resize", check);
-    return () => window.removeEventListener("resize", check);
-  }, []);
-
-  // Auto-open sidebar on desktop when first reading arrives
-  useEffect(() => {
-    if (latestCx && !isMobile) setSidebarOpen(true);
-  }, [latestCx, isMobile]);
-
-  // Restore history
-  useEffect(() => {
-    if (!sessionId) return;
-    async function restore() {
-      try {
-        const [msgRes, cxRes] = await Promise.all([
-          fetch(`${SUPABASE_URL}/rest/v1/chat_messages?session_id=eq.${sessionId}&order=created_at.asc&select=id,role,content`,
-            { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }),
-          fetch(`${SUPABASE_URL}/rest/v1/coherence_readings?session_id=eq.${sessionId}&order=created_at.asc&select=cx,tau,lambda,veritas_ratio,has_dark_spot,zone_detail`,
-            { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }),
-        ]);
-        const msgs = await msgRes.json();
-        const cxs = await cxRes.json();
-        if (Array.isArray(msgs) && msgs.length > 0)
-          setMessages(msgs.map((m: { id: string; role: "user"|"assistant"; content: string }) => ({ id: m.id, role: m.role, content: m.content })));
-        if (Array.isArray(cxs) && cxs.length > 0) {
-          const readings: CxReading[] = cxs.map((r: Record<string, unknown>) => ({
-            Cx: Number(r.cx), tau: Number(r.tau), lambda: Number(r.lambda),
-            veritas_ratio: Number(r.veritas_ratio), has_dark_spot: Boolean(r.has_dark_spot),
-            zones: (r.zone_detail as Record<string, ZoneReading>) || {},
-          }));
-          setCxHistory(readings);
-          setLatestCx(readings[readings.length - 1]);
-        }
-      } catch (e) { console.error("History restore failed:", e); }
-    }
-    restore();
+    if (!sessionId) setSessionId(crypto.randomUUID());
   }, [sessionId]);
-
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-
-  const startNewSession = useCallback(() => {
-    localStorage.removeItem("roseglass-session-id");
-    window.location.reload();
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    setIsMobile(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
   }, []);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, loading]);
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim();
-    if (!text || loading) return;
-    setInput("");
+  // ─── Send message ─────────────────────────────────────────────
+  const sendMessage = useCallback(async (overrideContent?: string) => {
+    const content = overrideContent || input.trim();
+    if (!content || loading) return;
+
+    const isInitiate = content === "__roseglass_initiate__";
+    if (!isInitiate) {
+      const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content };
+      setMessages(prev => [...prev, userMsg]);
+      setInput("");
+    }
     setLoading(true);
-    const userMsg: ChatMessage = { role: "user", content: text, id: crypto.randomUUID() };
-    setMessages(prev => [...prev, userMsg]);
+
     try {
+      const bodyMessage = isInitiate ? `__roseglass_initiate__::${getRandomSeed()}` : content;
+
       const res = await fetch(`${SUPABASE_URL}/functions/v1/roseglass-chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
-        body: JSON.stringify({ session_id: sessionId, message: text }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({ session_id: sessionId, message: bodyMessage }),
       });
       const data = await res.json();
-      if (data.error) {
-        setMessages(prev => [...prev, { role: "assistant", content: `Error: ${data.error}`, id: crypto.randomUUID() }]);
-      } else {
-        const cx: CxReading = data.cx;
-        setLatestCx(cx);
-        setCxHistory(prev => [...prev, cx]);
-        setMessages(prev => prev.map(m => m.id === userMsg.id ? { ...m, cx } : m));
-        setMessages(prev => [...prev, { role: "assistant", content: data.content, id: crypto.randomUUID() }]);
+      if (data.error) throw new Error(data.error);
+
+      const assistantMsg: ChatMessage = {
+        id: crypto.randomUUID(), role: "assistant", content: data.content,
+        cx: data.cx || undefined,
+      };
+      setMessages(prev => [...prev, assistantMsg]);
+      if (data.cx && (data.cx.Cx > 0 || data.compute_source === "first-message")) {
+        setLatestCx(data.cx);
+        if (data.cx.Cx > 0) setCxHistory(prev => [...prev, data.cx]);
       }
-    } catch (e) {
-      console.error("Chat error:", e);
-      setMessages(prev => [...prev, { role: "assistant", content: "Connection error. Please try again.", id: crypto.randomUUID() }]);
+      if (!isMobile) setSidebarOpen(true);
+    } catch (err) {
+      const errMsg: ChatMessage = {
+        id: crypto.randomUUID(), role: "assistant",
+        content: `Connection interrupted. ${err instanceof Error ? err.message : ""}`,
+      };
+      setMessages(prev => [...prev, errMsg]);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [input, loading, sessionId]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
+  const letRoseGlassStart = useCallback(() => {
+    sendMessage("__roseglass_initiate__");
+  }, [sendMessage]);
+
   if (!hydrated) {
     return (
       <div className="flex h-screen w-screen items-center justify-center"
-           style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}>
-        <span className="text-xs font-mono" style={{ color: "var(--text-ghost)" }}>initializing...</span>
+           style={{ background: "#0a0a0e", color: "var(--text-primary)" }}>
+        <div className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--accent)", animation: "warmPulse 3s ease-in-out infinite" }} />
       </div>
     );
   }
 
+  const isEmpty = messages.length === 0 && !loading;
+
   return (
     <div className="flex h-screen w-screen overflow-hidden"
-         style={{ background: "radial-gradient(ellipse at 50% 0%, #0f0f14 0%, #07070a 50%, #050508 100%)", color: "var(--text-primary)" }}>
+         style={{ background: bgStyle, transition: "background 3s ease-in-out" }}>
 
-      {/* Mobile C(x) pill */}
-      {isMobile && latestCx && !sidebarOpen && (
-        <button onClick={() => setSidebarOpen(true)}
-                className="fixed top-3 right-3 z-40 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-mono backdrop-blur-sm"
-                style={{ background: "rgba(7,7,10,0.8)", border: `1px solid ${cxColor(latestCx.Cx, latestCx.has_dark_spot)}33`, color: cxColor(latestCx.Cx, latestCx.has_dark_spot) }}>
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: cxColor(latestCx.Cx, latestCx.has_dark_spot) }} />
-          {latestCx.Cx.toFixed(3)}
-        </button>
-      )}
-
-      {/* Main Chat Area */}
+      {/* ─── Main chat area ─── */}
       <div className="flex-1 flex flex-col min-w-0">
+
         {/* Header */}
-        <header className="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b" style={{ borderColor: "var(--border-subtle)" }}>
-          <div className="flex items-center gap-2 md:gap-3">
-            <div className="w-2 h-2 rounded-full" style={{ background: "linear-gradient(135deg, #e8b4b8, #b4a0d1)" }} />
-            <h1 className="text-sm md:text-base tracking-wide" style={{ fontFamily: "var(--font-serif)" }}>
-              roseglass<span style={{ color: "var(--text-tertiary)" }}>.chat</span>
-            </h1>
-            {latestCx && (
-              <span className="hidden md:inline text-xs font-mono ml-2" style={{ color: "var(--text-tertiary)" }}>
-                C(x)={latestCx.Cx.toFixed(3)}<span className="ml-1.5">τ={latestCx.tau.toFixed(1)}</span>
-              </span>
-            )}
-          </div>
+        <header className="flex items-center justify-between px-4 py-3 shrink-0"
+                style={{ borderBottom: "1px solid var(--border-subtle)" }}>
           <div className="flex items-center gap-2">
-            <button onClick={startNewSession}
-                    className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono"
-                    style={{ color: "var(--text-tertiary)" }}>+ new</button>
-            <button onClick={() => setSidebarOpen(!sidebarOpen)}
-                    className="p-2 rounded-md transition-all hover:bg-white/5 text-xs font-mono"
-                    style={{ color: "var(--text-tertiary)" }}>{sidebarOpen ? "◨" : "◧"}</button>
+            <div className="w-2 h-2 rounded-full" style={{ background: "var(--accent)", opacity: 0.7 }} />
+            <h1 className="text-sm tracking-wide" style={{ fontFamily: "var(--font-serif)", color: "var(--text-secondary)" }}>
+              rose<span style={{ color: "var(--accent)" }}>glass</span>
+            </h1>
+            {latestCx && <PresenceIndicator cx={latestCx} />}
+          </div>
+          <div className="flex items-center gap-3 text-[10px] font-mono" style={{ color: "var(--text-ghost)" }}>
+            <button onClick={() => { setMessages([]); setLatestCx(null); setCxHistory([]); setSidebarOpen(false); setSessionId(""); }}
+                    className="hover:opacity-70 transition-opacity">new</button>
+            {!isMobile && sidebarOpen && (
+              <button onClick={() => setSidebarOpen(false)} className="hover:opacity-70 transition-opacity">×</button>
+            )}
           </div>
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 md:px-6 space-y-6">
-          {messages.length === 0 && (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center max-w-sm px-6">
-                <div className="text-3xl md:text-4xl mb-6 italic"
-                     style={{ fontFamily: "var(--font-serif)", color: "var(--text-tertiary)", lineHeight: 1.3 }}>
-                  The dark spots are<br/>where the signal is.
-                </div>
-                <p className="text-sm leading-relaxed" style={{ color: "var(--text-ghost)" }}>
-                  Every message passes through four perception zones.
-                  What surfaces may not be what matters.
-                </p>
-              </div>
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
+          {isEmpty ? (
+            <div className="flex flex-col items-center justify-center h-full text-center">
+              <div className="w-16 h-16 rounded-full mb-8"
+                   style={{ background: "radial-gradient(circle, var(--accent) 0%, transparent 70%)", opacity: 0.3 }} />
+              <h2 className="text-xl font-light mb-2"
+                  style={{ fontFamily: "var(--font-serif)", color: "var(--text-primary)", lineHeight: 1.5 }}>
+                Not every conversation<br />needs to be helpful.
+              </h2>
+              <p className="text-sm italic mb-8" style={{ color: "var(--text-ghost)", fontFamily: "var(--font-serif)" }}>
+                Some need to be honest.
+              </p>
+              <button onClick={letRoseGlassStart}
+                      className="start-button px-6 py-2.5 rounded-full text-sm transition-all hover:scale-[1.02]"
+                      style={{
+                        fontFamily: "var(--font-serif)",
+                        color: "var(--accent)",
+                        border: "1px solid var(--accent)",
+                        background: "transparent",
+                      }}>
+                {loading ? "arriving..." : "Let Rose Glass start"}
+              </button>
+              <p className="text-[10px] mt-3" style={{ color: "var(--text-ghost)" }}>or type below</p>
             </div>
-          )}
-
-          {messages.map(msg => (
-            <div key={msg.id} className={cn("max-w-full md:max-w-2xl", msg.role === "user" ? "ml-auto" : "mr-auto")}>
-              {msg.role === "assistant" ? (
-                <div className="pl-4 py-1 text-[15px] leading-[1.8]"
-                     style={{ fontFamily: "var(--font-serif)", borderLeft: "2px solid var(--border-light)" }}>
-                  {msg.content.split("\n").map((line, i) => <p key={i} className={i > 0 ? "mt-2" : ""}>{line}</p>)}
-                </div>
-              ) : (
-                <div>
-                  <div className="rounded-xl px-4 py-3 text-sm leading-relaxed"
-                       style={{ background: "var(--bg-surface)", border: "1px solid var(--border-light)" }}>
-                    {msg.content.split("\n").map((line, i) => <p key={i} className={i > 0 ? "mt-2" : ""}>{line}</p>)}
-                  </div>
-                  {msg.cx && (
-                    <div className="flex items-center justify-end mt-1 gap-1.5">
-                      <CxDot cx={msg.cx} />
-                      <span className="text-[10px] font-mono" style={{ color: "var(--text-ghost)" }}>{msg.cx.Cx.toFixed(3)}</span>
+          ) : (
+            <div className="max-w-2xl mx-auto space-y-6">
+              {messages.map((msg) => (
+                <div key={msg.id}>
+                  {msg.role === "user" ? (
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] px-4 py-3 rounded-2xl text-sm"
+                           style={{
+                             background: "rgba(196,145,107,0.08)",
+                             border: "1px solid rgba(196,145,107,0.12)",
+                             color: "var(--text-primary)",
+                             lineHeight: 1.7,
+                           }}>
+                        {msg.content}
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      {msg.cx && msg.cx.Cx > 0 && (
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <PresenceIndicator cx={msg.cx} />
+                          <span className="text-[9px] font-mono" style={{ color: "var(--text-ghost)" }}>
+                            {msg.cx.Cx.toFixed(3)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="assistant-prose text-sm" style={{ color: "var(--text-secondary)", lineHeight: 1.85, fontFamily: "var(--font-serif)" }}>
+                        {msg.content.split("\n\n").map((para, i) => (
+                          <p key={i} className={i > 0 ? "mt-4" : ""}>{para}</p>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
+              ))}
+              {loading && (
+                <div className="flex gap-1.5 py-4">
+                  {[0, 1, 2].map(i => (
+                    <div key={i} className="w-1.5 h-1.5 rounded-full"
+                         style={{ background: "var(--accent)", opacity: 0.4, animation: `warmPulse 1.5s ease-in-out ${i * 0.3}s infinite` }} />
+                  ))}
+                </div>
               )}
             </div>
-          ))}
-
-          {loading && (
-            <div className="max-w-full md:max-w-2xl mr-auto py-3 px-4">
-              <div className="text-xs italic" style={{ fontFamily: "var(--font-serif)", color: "var(--text-ghost)" }}>
-                perceiving...
-              </div>
-            </div>
           )}
-
-          <div ref={messagesEndRef} />
         </div>
 
         {/* Input */}
-        <div className="px-4 py-3 md:px-6 md:py-4 border-t" style={{ borderColor: "var(--border-subtle)" }}>
-          <div className="flex items-end gap-2 max-w-3xl mx-auto">
-            <textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Say something real..."
-              rows={1}
-              className="flex-1 resize-none rounded-xl px-4 py-3 text-base md:text-sm focus:outline-none transition-all"
-              style={{ minHeight: "48px", maxHeight: "200px", background: "var(--bg-surface)", border: "1px solid var(--border-light)", color: "var(--text-primary)" }}
-              onInput={e => { const t = e.target as HTMLTextAreaElement; t.style.height = "48px"; t.style.height = Math.min(t.scrollHeight, 200) + "px"; }}
-            />
-            <button onClick={sendMessage} disabled={!input.trim() || loading}
-                    className="px-4 py-3 rounded-xl text-base md:text-sm font-medium transition-all disabled:opacity-20"
-                    style={{ background: input.trim() ? "var(--accent-glow)" : "transparent", border: "1px solid var(--border-light)", minHeight: "48px" }}>
-              →
+        <div className="shrink-0 px-4 py-3" style={{ borderTop: "1px solid var(--border-subtle)" }}>
+          <div className="max-w-2xl mx-auto flex items-end gap-2 rounded-xl px-4 py-3"
+               style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-subtle)" }}>
+            <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+                      placeholder="Say what's on your mind"
+                      rows={1}
+                      className="flex-1 bg-transparent resize-none outline-none text-sm"
+                      style={{ color: "var(--text-primary)", fontFamily: "var(--font-serif)", lineHeight: 1.6, maxHeight: "120px" }} />
+            <button onClick={() => sendMessage()} disabled={loading || !input.trim()}
+                    className="text-sm px-1 pb-0.5 transition-opacity"
+                    style={{ color: "var(--accent)", opacity: input.trim() ? 1 : 0.3 }}>
+              ↑
             </button>
           </div>
         </div>
       </div>
 
-      {/* Desktop sidebar */}
+      {/* ─── Sidebar (desktop) ─── */}
       {sidebarOpen && !isMobile && (
-        <aside className="w-72 border-l overflow-y-auto flex-shrink-0"
-               style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}>
-          <div className="p-4">
-            <TopologyContent latestCx={latestCx} cxHistory={cxHistory} messages={messages} />
+        <aside className="w-56 shrink-0 overflow-y-auto px-4 py-3"
+               style={{ borderLeft: "1px solid var(--border-subtle)" }}>
+          <div className="flex items-center justify-between mb-4">
+            <span className="text-[10px] font-mono tracking-widest" style={{ color: "var(--text-ghost)" }}>PRESENCE</span>
+            <button onClick={() => setShowDetail(!showDetail)}
+                    className="text-[9px] font-mono px-2 py-0.5 rounded transition-colors"
+                    style={{ color: "var(--text-tertiary)" }}>
+              {showDetail ? "simple" : "detail"}
+            </button>
           </div>
+          {showDetail ? (
+            <TopologyDetail cx={latestCx} cxHistory={cxHistory} messages={messages} />
+          ) : (
+            <div>
+              {latestCx ? (
+                <div>
+                  <div className="text-center py-6">
+                    <div className="text-3xl font-light italic tracking-wide transition-all duration-[2000ms]"
+                         style={{
+                           fontFamily: "var(--font-serif)",
+                           color: latestCx.has_dark_spot ? "var(--signal-destructive)" : "var(--accent)",
+                         }}>
+                      {latestCx.Cx.toFixed(4)}
+                    </div>
+                    <div className="text-[10px] mt-2" style={{ color: "var(--text-ghost)", fontFamily: "var(--font-mono)" }}>
+                      coherence
+                    </div>
+                  </div>
+                  <CxSparkline history={cxHistory} />
+                  <div className="mt-4 flex justify-center">
+                    <PresenceIndicator cx={latestCx} />
+                  </div>
+                  {latestCx.has_dark_spot && (
+                    <div className="mt-4 text-center text-[10px] italic" style={{ color: "var(--signal-destructive)", fontFamily: "var(--font-serif)" }}>
+                      something beneath the surface
+                    </div>
+                  )}
+                  <div className="mt-6 pt-3 text-[9px] font-mono space-y-1"
+                       style={{ borderTop: "1px solid var(--border-subtle)", color: "var(--text-ghost)" }}>
+                    <div className="flex justify-between"><span>depth</span><span>{latestCx.tau < 1.5 ? "shallow" : latestCx.tau < 2.5 ? "mid" : "deep"}</span></div>
+                    <div className="flex justify-between"><span>exchanges</span><span>{messages.filter(m => m.role === "user").length}</span></div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-center py-8 italic" style={{ color: "var(--text-ghost)", fontFamily: "var(--font-serif)" }}>
+                  Waiting to listen.
+                </div>
+              )}
+            </div>
+          )}
         </aside>
       )}
 
       {/* Mobile bottom sheet */}
       {sidebarOpen && isMobile && (
-        <div className="fixed inset-x-0 bottom-0 z-50"
-             style={{ background: "var(--bg-primary)", borderTop: "1px solid var(--border-light)", maxHeight: "60vh", overflowY: "auto", borderRadius: "16px 16px 0 0" }}>
-          <div className="p-4">
-            <div className="w-10 h-1 rounded-full mx-auto mb-4"
-                 style={{ background: "var(--border-focus)" }}
-                 onClick={() => setSidebarOpen(false)} />
-            <TopologyContent latestCx={latestCx} cxHistory={cxHistory} messages={messages} />
+        <>
+          <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setSidebarOpen(false)} />
+          <div className="fixed inset-x-0 bottom-0 z-50 rounded-t-2xl overflow-y-auto"
+               style={{ background: "rgba(10,10,14,0.95)", backdropFilter: "blur(20px)", maxHeight: "55vh" }}>
+            <div className="p-4">
+              <div className="w-8 h-1 rounded-full mx-auto mb-4" style={{ background: "var(--border-focus)" }}
+                   onClick={() => setSidebarOpen(false)} />
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-[10px] font-mono tracking-widest" style={{ color: "var(--text-ghost)" }}>PRESENCE</span>
+                <button onClick={() => setShowDetail(!showDetail)}
+                        className="text-[9px] font-mono px-2 py-0.5 rounded"
+                        style={{ color: "var(--text-tertiary)" }}>
+                  {showDetail ? "simple" : "detail"}
+                </button>
+              </div>
+              {showDetail
+                ? <TopologyDetail cx={latestCx} cxHistory={cxHistory} messages={messages} />
+                : latestCx && (
+                    <div className="text-center py-4">
+                      <div className="text-3xl font-light italic" style={{ fontFamily: "var(--font-serif)", color: "var(--accent)" }}>
+                        {latestCx.Cx.toFixed(4)}
+                      </div>
+                      <div className="mt-3 flex justify-center"><PresenceIndicator cx={latestCx} /></div>
+                    </div>
+                  )
+              }
+            </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
